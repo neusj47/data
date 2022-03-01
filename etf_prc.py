@@ -127,18 +127,6 @@ def get_bdate_info(start_date, end_date) :
             date['마지막영업일'].iloc[i] = 0
     return date
 
-def get_etf_num(etf_code,start_date,end_date) :
-    bdate = get_bdate_info(start_date, end_date)
-    df = stock.get_etf_ohlcv_by_ticker(bdate.iloc[0].일자).reset_index()[['티커','상장좌수']].rename(columns={'상장좌수':bdate.iloc[0].일자})
-    df = df[df['티커'].isin(etf_code)].reset_index(drop=True)
-    for i in range(1,len(bdate)):
-        df_temp = stock.get_etf_ohlcv_by_ticker(bdate.iloc[i].일자).reset_index()[['티커','상장좌수']].rename(columns={'상장좌수':bdate.iloc[i].일자})
-        df_temp = df_temp[df_temp['티커'].isin(etf_code)].reset_index(drop=True)
-        df = pd.merge(df, df_temp, on ='티커', how = 'outer')
-    df_T = df.T
-    df_T.columns = list(df['티커'])
-    return df_T
-
 def get_etf_prc(start_date, end_date) :
     bdate = get_bdate_info(start_date, end_date)
     df = pd.DataFrame()
