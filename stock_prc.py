@@ -1,28 +1,23 @@
 import datetime
 import pymysql
-from time import sleep
-import math
-import pymysql
 import pandas as pd
-import yfinance as yf
 from pykrx import stock
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 from dateutil.relativedelta import relativedelta
-import numpy as np
 import warnings
 from bs4 import BeautifulSoup
 warnings.filterwarnings( 'ignore' )
 
 
-
-
+# 0. DB 셋업
 conn = pymysql.connect(host='localhost', user='root', password='sjyoo1~', port = 3307, db='testdb', charset='utf8')
 cursor = conn.cursor()
 sql = """
-CREATE TABLE IF NOT EXISTS stock_prcs (
+CREATE TABLE IF NOT EXISTS stock_prc (
 stddate date,
+ticker VARCHAR(20),
 code VARCHAR(20),
 company VARCHAR(50),
 sector VARCHAR(50),
@@ -45,8 +40,21 @@ cursor.execute(sql)
 conn.commit()
 
 
-stddate = '20220225'
 
+# 1. 날짜, 티커정보, 섹터정보, 가격, historical 가격 빌드함수
+def get_bdate_info(start_date, end_date) :
+    end_date = stock.get_nearest_business_day_in_a_week(datetime.strftime(datetime.strptime(end_date, "%Y%m%d") - relativedelta(days=1),"%Y%m%d"))
+    date = pd.DataFrame(stock.get_previous_business_days(fromdate=start_date, todate=end_date)).rename(columns={0: '일자'})
+    prevbdate = date.shift(1).rename(columns={'일자': '전영업일자'})
+    date = pd.concat([date, prevbdate], axis=1).fillna(
+        datetime.strftime(datetime.strptime(stock.get_nearest_business_day_in_a_week(datetime.strftime(datetime.strptime(start_date, "%Y%m%d") - relativedelta(days=1), "%Y%m%d")), "%Y%m%d"),"%Y-%m-%d %H:%M:%S"))
+    date['마지막영업일'] = ''
+    for i in range(0, len(date) - 1):
+        if abs(datetime.strptime(datetime.strftime(date.iloc[i + 1].일자, "%Y%m%d"), "%Y%m%d") - datetime.strptime(datetime.strftime(date.iloc[i].일자, "%Y%m%d"), "%Y%m%d")).days > 1:
+            date['마지막영업일'].iloc[i] = 1
+        else:
+            date['마지막영업일'].iloc[i] = 0
+    return date
 
 def get_ticker_info():
     query_str_parms = {
@@ -116,7 +124,7 @@ def get_sector(stddate):
     return df
 
 def get_adj_price(ticker) :
-    response = requests.get('https://fchart.stock.naver.com/sise.nhn?symbol={}&timeframe=day&count=1000&requestType=0'.format(ticker))
+    response = requests.get('https://fchart.stock.naver.com/sise.nhn?symbol={}&timeframe=day&count=500&requestType=0'.format(ticker))
     bs = BeautifulSoup(response.content, "html.parser")
     df_temp = bs.select('item')
     columns = ['Date', 'Open' ,'High', 'Low', 'Close', 'Volume']
@@ -133,36 +141,45 @@ def get_daily_prc(stddate) :
     ticker_info['날짜'] = datetime.strftime(datetime.strptime(stddate, "%Y%m%d"), "%Y-%m-%d")
     ticker_info['수정종가'] = ''
     ticker_info['전일수정종가'] = ''
-    for i in range(0, 5) :
+    for i in range(0, len(ticker_info)) :
         try :
             prc = get_adj_price(ticker_info['티커'].iloc[i])
             ticker_info['수정종가'].iloc[i] = int(prc[prc.Date == datetime.strftime(datetime.strptime(stddate, "%Y%m%d"), "%Y-%m-%d")]['Close'])
             ticker_info['전일수정종가'].iloc[i] = int(prc[prc.Date == datetime.strftime(datetime.strptime(prevbdate, "%Y%m%d"), "%Y-%m-%d")]['Close'])
         except : pass
+    ticker_info = ticker_info[(ticker_info['전일수정종가'] != "")]
+    ticker_info = ticker_info[(ticker_info['수정종가'] != "")]
     ticker_info['일수익률'] = ticker_info['수정종가'] / ticker_info['전일수정종가'] - 1
     mcap = stock.get_market_cap_by_ticker(datetime.strftime(datetime.strptime(stddate, "%Y%m%d"), "%Y-%m-%d"), market="ALL").reset_index(drop=False)[['티커','시가총액','상장주식수','거래대금']]
     prevmcap = stock.get_market_cap_by_ticker(datetime.strftime(datetime.strptime(prevbdate, "%Y%m%d"), "%Y-%m-%d"), market="ALL").reset_index(drop=False)[['티커','시가총액','상장주식수','거래대금']].rename(columns={'시가총액':'전일시가총액','상장주식수':'전일상장주식수','거래대금':'전일거래대금'})
     prc = pd.merge(ticker_info, mcap, on = '티커', how = 'inner')
     prc = pd.merge(prc, prevmcap, on = '티커', how = 'inner')
-    prc = prc[['날짜','티커','종목명','섹터','업종','시장구분','소속부','전일수정종가','수정종가','일수익률','전일시가총액','시가총액','전일상장주식수','상장주식수','전일거래대금','거래대금']].fillna()
+    prc['종목코드'] = "A" + prc['티커']
+    prc = prc[['날짜','티커','종목코드','종목명','섹터','업종','시장구분','소속부','전일수정종가','수정종가','일수익률','전일시가총액','시가총액','전일상장주식수','상장주식수','전일거래대금','거래대금']].fillna('')
     prc['시가총액'] = prc['시가총액'] / 100000000
     prc['전일시가총액'] = prc['전일시가총액'] / 100000000
     prc['거래대금'] = prc['거래대금'] / 100000000
     prc['전일거래대금'] = prc['전일거래대금'] / 100000000
     return prc
 
-prc = get_daily_prc(stddate)
 
+# 2. 테이블 입력
+start_date = '20220103'
+end_date = '20220228'
+date = get_bdate_info(start_date, end_date)
 
-for row in prc.itertuples():
-    sql = """
-    insert into stock_prcs
-    (stddate, code, company, sector, industry, gubun, sosok, prev_prc, prc, rtn, prev_mcap, mcap, prev_qty, qty, prev_amt, amt)
-     values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """
-    cursor.execute(sql, (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]
-                         , row[12],row[13], row[14], row[15], row[16]))
-    conn.commit()
+for i in range(0,len(date)) :
+    prc = get_daily_prc(datetime.strftime(date.일자.iloc[i], "%Y%m%d"))
+
+    for row in prc.itertuples():
+        sql = """
+        insert into stock_prc
+        (stddate, ticker, code, company, sector, industry, gubun, sosok, prev_prc, prc, rtn, prev_mcap, mcap, prev_qty, qty, prev_amt, amt)
+         values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(sql, (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]
+                             , row[12], row[13], row[14], row[15], row[16], row[17]))
+        conn.commit()
 
 
 
